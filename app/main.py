@@ -182,3 +182,32 @@ def get_documents(db: Session = Depends(get_db)):
             "content_preview": d.content_text[:200] if d.content_text else None
         } for d in docs
     ]
+
+@app.delete("/reset")
+def reset_system(db: Session = Depends(get_db)):
+    """
+    HARD RESET:
+    1. Delete all records from DB.
+    2. Delete all files in uploads folder.
+    """
+    try:
+        # 1. Clear DB
+        db.query(Document).delete()
+        db.commit()
+        
+        # 2. Clear Uploads
+        if os.path.exists(UPLOAD_DIR):
+            for filename in os.listdir(UPLOAD_DIR):
+                file_path = os.path.join(UPLOAD_DIR, filename)
+                try:
+                    if os.path.isfile(file_path) or os.path.islink(file_path):
+                        os.unlink(file_path)
+                    elif os.path.isdir(file_path):
+                        shutil.rmtree(file_path)
+                except Exception as e:
+                    logger.error(f"Failed to delete {file_path}: {e}")
+
+        return {"status": "System has been reset. Database and uploads cleared."}
+    except Exception as e:
+        logger.error(f"Reset failed: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
