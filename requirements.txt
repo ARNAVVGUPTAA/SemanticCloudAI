@@ -1,0 +1,10 @@
+fastapi
+uvicorn
+celery
+redis
+sqlalchemy
+psycopg2-binary
+pypdf
+pytesseract
+requests
+python-multipart
