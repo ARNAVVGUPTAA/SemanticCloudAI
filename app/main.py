@@ -163,3 +163,22 @@ def query_documents(
             } for d in results
         ]
     }
+
+@app.get("/documents")
+def get_documents(db: Session = Depends(get_db)):
+    """
+    Get all documents from the database.
+    Useful for debugging and inspection.
+    """
+    docs = db.query(Document).all()
+    return [
+        {
+            "id": d.id,
+            "filename": d.filename,
+            "status": d.status,
+            "tags": d.tags,
+            "category": d.category,
+            "upload_time": d.upload_time,
+            "content_preview": d.content_text[:200] if d.content_text else None
+        } for d in docs
+    ]
