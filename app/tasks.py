@@ -24,7 +24,7 @@ def get_db_session():
     return SessionLocal()
 
 @celery_app.task
-def process_document(doc_id: int):
+def process_document(doc_id: int, extra_tags: str = None):
     """
     Background task to process uploaded documents.
     1. Extract text (OCR/PDF).
@@ -73,8 +73,7 @@ def process_document(doc_id: int):
         prompt = f"""
         Analyze the following text from a document.
         Return ONLY a JSON object with the following keys:
-        - "summary": A brief summary of the content (string).
-        - "tags": A list of relevant tags (list of strings).
+        - "tags": A list of EXHAUSTIVE, highly descriptive tags (list of strings).
         - "category": A single broad category for this document (string).
         
         Do not include any other text, markdown formatting, or explanations. just the JSON.
@@ -103,8 +102,20 @@ def process_document(doc_id: int):
             # Parse JSON
             try:
                 metadata = json.loads(analysis_text)
-                doc.summary = metadata.get("summary")
-                doc.tags = metadata.get("tags")
+                
+                tags = metadata.get("tags", [])
+                
+                # Add extra tags if provided
+                if extra_tags:
+                    tags.extend([t.strip() for t in extra_tags.split(",") if t.strip()])
+                
+                # Add timestamp tag
+                if doc.upload_time:
+                    # Format as timestamp:YYYY-MM-DD
+                    ts_tag = f"timestamp:{doc.upload_time.strftime('%Y-%m-%d')}"
+                    tags.append(ts_tag)
+
+                doc.tags = tags
                 doc.category = metadata.get("category")
                 doc.status = "COMPLETED"
             except json.JSONDecodeError:
