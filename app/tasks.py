@@ -88,12 +88,12 @@ def process_document(doc_id: int, extra_tags: str = None):
             response = requests.post(
                 f"{OLLAMA_HOST}/api/generate",
                 json={
-                    "model": "llama3.2",
+                    "model": "llama3.2:1b",
                     "prompt": prompt,
                     "stream": False,
                     "format": "json" # Force JSON mode if supported by model/version
                 },
-                timeout=120
+                timeout=300
             )
             response.raise_for_status()
             result = response.json()

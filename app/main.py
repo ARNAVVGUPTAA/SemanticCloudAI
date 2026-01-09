@@ -77,12 +77,12 @@ def query_documents(
         response = requests.post(
             f"{OLLAMA_HOST}/api/generate",
             json={
-                "model": "llama3.2",
+                "model": "llama3.2:1b",
                 "prompt": prompt,
                 "stream": False,
                 "format": "json"
             },
-            timeout=10
+            timeout=30
         )
         if response.status_code == 200:
             res_json = response.json()
