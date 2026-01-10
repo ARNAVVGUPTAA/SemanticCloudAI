@@ -93,21 +93,28 @@ def process_document(doc_id: int, extra_tags: str = None):
         prompt = f"""
         Analyze the following text from a document.
         
-        Goal: Extract metadata to make this document easily searchable in a semantic document store.
+        prompt = f"""
+        Analyze the following text from a document.
+        
+        Goal: Extract exhaustive metadata for a search engine. Quantity and precision matter.
         
         Return ONLY a JSON object with the following keys:
-        - "tags": A list of EXHAUSTIVE, highly descriptive tags (list of strings).
-          Rules for tags:
-          1. Include ALL metadata found: specific names of people, companies, or products.
-          2. Include the document TYPE explicitly (e.g., "Invoice", "Receipt", "CV", "Resume", "Bill", "Study Note", "Contract").
-          3. Include implicit context or topics (e.g., if it talks about TCP/IP, add "Networking", "Computer Science", "Study Material").
-          4. If it looks like a bill, include "Bill", "Expense".
+        - "tags": A list of strings.
+          CRITICAL INSTRUCTIONS FOR TAGS:
+          1. Extract AT LEAST 20 tags if the content allows.
+          2. Extract EVERY proper noun (Person names, Company names, Locations, Product names).
+          3. Extract ALL dates (years, specific dates like "2023", "January").
+          4. Extract ALL numeric identifiers (Invoice numbers, Account numbers).
+          5. Extract Document Type (e.g. "Invoice", "Receipt", "Bank Statement", "Notes").
+          6. Extract inferred topics (e.g. "Networking", "Finance", "Groceries").
+          7. Be granular. Don't summarize, extract.
         - "category": A single broad category for this document (e.g., "Finance", "Education", "Legal", "Personal", "Work").
+          refrain from making new categories or types that mean very similar to one of the previous ones
         
         Do not include any other text, markdown formatting, or explanations. just the JSON.
         
         TEXT:
-        {extracted_text[:4000]} 
+        {extracted_text[:6000]} 
         """
         # Truncate text to avoid context window issues if too large, 
         # though llama3.2 has decent context. 4000 chars is safe start.
