@@ -93,9 +93,6 @@ def process_document(doc_id: int, extra_tags: str = None):
         prompt = f"""
         Analyze the following text from a document.
         
-        prompt = f"""
-        Analyze the following text from a document.
-        
         Goal: Extract exhaustive metadata for a search engine. Quantity and precision matter.
         
         Return ONLY a JSON object with the following keys:
