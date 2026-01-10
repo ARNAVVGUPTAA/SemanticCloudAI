@@ -8,3 +8,4 @@ pypdf
 pytesseract
 requests
 python-multipart
+numpy

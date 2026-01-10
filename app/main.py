@@ -3,6 +3,7 @@ import shutil
 import json
 import logging
 import requests
+import numpy as np
 from typing import List, Optional
 from fastapi import FastAPI, UploadFile, File, Form, Depends, HTTPException
 from sqlalchemy.orm import Session
@@ -29,7 +30,11 @@ def upload_file(
     db: Session = Depends(get_db)
 ):
     try:
-        file_location = os.path.join(UPLOAD_DIR, file.filename)
+        # Create user-specific directory
+        user_dir = os.path.join(UPLOAD_DIR, user_id)
+        os.makedirs(user_dir, exist_ok=True)
+        
+        file_location = os.path.join(user_dir, file.filename)
         with open(file_location, "wb") as buffer:
             shutil.copyfileobj(file.file, buffer)
         
@@ -117,28 +122,69 @@ def query_documents(
     # Let's try a robust approach: filter in Python for now as dataset is likely small for this PoC.
     # ideally: db_query = db_query.filter(func.json_each(Document.tags).has(func.any(context_tags))) - depends on DB
     
-    # Let's start with all docs passed previous filters
-    candidates = db_query.all()
+    # --- Semantic Search Implementation ---
     
-    matches = []
-    for doc in candidates:
-        score = 0
-        doc_tags_set = set(doc.tags) if doc.tags else set()
+    # 1. Generate Query Embedding
+    query_embedding = None
+    try:
+        # Try nomic-embed-text first
+        model = "nomic-embed-text"
+        req_body = {"model": model, "prompt": query_text}
+        res = requests.post(f"{OLLAMA_HOST}/api/embeddings", json=req_body, timeout=30)
         
-        # Check tag overlap
-        # Normalized comparison
-        doc_tags_normalized = {str(t).lower() for t in doc_tags_set}
-        
-        for q_tag in context_tags:
-            if q_tag.lower() in doc_tags_normalized:
-                score += 1
-        
-        # Also check filename/content as fallback
-        if any(q_tag.lower() in doc.filename.lower() for q_tag in context_tags):
-            score += 0.5
+        if res.status_code != 200:
+            # Fallback
+            model = "llama3.2:1b"
+            req_body["model"] = model
+            res = requests.post(f"{OLLAMA_HOST}/api/embeddings", json=req_body, timeout=30)
+            
+        if res.status_code == 200:
+            query_embedding = res.json().get("embedding")
+        else:
+            logger.error(f"Failed to get query embedding: {res.text}")
+            
+    except Exception as e:
+        logger.error(f"Query embedding failed: {e}")
 
-        if score > 0 or not context_tags:
+    # 2. Filter Documents via Vector Similarity
+    candidates = db_query.all()
+    matches = []
+    
+    if query_embedding and len(candidates) > 0:
+        query_vec = np.array(query_embedding)
+        norm_query = np.linalg.norm(query_vec)
+        
+        for doc in candidates:
+            score = 0
+            if doc.embedding:
+                doc_vec = np.array(doc.embedding)
+                norm_doc = np.linalg.norm(doc_vec)
+                if norm_query > 0 and norm_doc > 0:
+                    # Cosine Similarity
+                    score = float(np.dot(query_vec, doc_vec) / (norm_query * norm_doc))
+            
+            # Hybrid: Boost score if keyword matches found in tags or filename (simple fallback)
+            # This helps if vectors are weak on specific keywords
+            if any(term.lower() in doc.filename.lower() for term in context_tags):
+                score += 0.2
+            
             matches.append((doc, score))
+    else:
+        # Fallback to legacy keyword matching if embedding failed
+        logger.warning("Falling back to keyword matching")
+        for doc in candidates:
+            score = 0
+            doc_tags_set = set(doc.tags) if doc.tags else set()
+            doc_tags_normalized = {str(t).lower() for t in doc_tags_set}
+            
+            for q_tag in context_tags:
+                if q_tag.lower() in doc_tags_normalized:
+                    score += 1
+            if any(q_tag.lower() in doc.filename.lower() for q_tag in context_tags):
+                score += 0.5
+            
+            if score > 0:
+                matches.append((doc, score))
             
     # Sort matches
     if sort_by_recency:

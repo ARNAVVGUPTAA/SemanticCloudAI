@@ -69,12 +69,40 @@ def process_document(doc_id: int, extra_tags: str = None):
 
         doc.content_text = extracted_text
         
-        # 2. Ollama Analysis
+        # 2. Ollama Analysis & Embedding
+        
+        # Helper to get embeddings
+        def get_embedding(text):
+            try:
+                # Try nomic-embed-text first, then llama3.2:1b
+                model = "nomic-embed-text"
+                req_body = {"model": model, "prompt": text}
+                res = requests.post(f"{OLLAMA_HOST}/api/embeddings", json=req_body, timeout=60)
+                if res.status_code != 200:
+                    model = "llama3.2:1b"
+                    req_body["model"] = model
+                    res = requests.post(f"{OLLAMA_HOST}/api/embeddings", json=req_body, timeout=60)
+                
+                if res.status_code == 200:
+                    return res.json().get("embedding")
+                return None
+            except Exception as e:
+                logger.error(f"Embedding failed: {e}")
+                return None
+
         prompt = f"""
         Analyze the following text from a document.
+        
+        Goal: Extract metadata to make this document easily searchable in a semantic document store.
+        
         Return ONLY a JSON object with the following keys:
         - "tags": A list of EXHAUSTIVE, highly descriptive tags (list of strings).
-        - "category": A single broad category for this document (string).
+          Rules for tags:
+          1. Include ALL metadata found: specific names of people, companies, or products.
+          2. Include the document TYPE explicitly (e.g., "Invoice", "Receipt", "CV", "Resume", "Bill", "Study Note", "Contract").
+          3. Include implicit context or topics (e.g., if it talks about TCP/IP, add "Networking", "Computer Science", "Study Material").
+          4. If it looks like a bill, include "Bill", "Expense".
+        - "category": A single broad category for this document (e.g., "Finance", "Education", "Legal", "Personal", "Work").
         
         Do not include any other text, markdown formatting, or explanations. just the JSON.
         
@@ -117,6 +145,12 @@ def process_document(doc_id: int, extra_tags: str = None):
 
                 doc.tags = tags
                 doc.category = metadata.get("category")
+                
+                # Generate Embedding using combined text representation
+                # content + tags + category gives a rich semantic representation
+                embedding_text = f"{doc.filename} {doc.category} {' '.join(tags)} {extracted_text[:1000]}"
+                doc.embedding = get_embedding(embedding_text)
+                
                 doc.status = "COMPLETED"
             except json.JSONDecodeError:
                 logger.error(f"Failed to parse Ollama JSON response: {analysis_text}")
