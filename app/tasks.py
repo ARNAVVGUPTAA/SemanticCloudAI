@@ -165,6 +165,7 @@ def process_document(doc_id: int, extra_tags: str = None):
     except Exception as e:
         logger.error(f"Critical error in task: {e}", exc_info=True)
         doc.status = "FAILED"
+        doc.content_text = f"Error processing document: {str(e)}"
         db.commit()
     finally:
         db.close()
