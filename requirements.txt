@@ -9,3 +9,6 @@ pytesseract
 requests
 python-multipart
 numpy
+gliner
+sentence-transformers
+torch

@@ -25,16 +25,6 @@ services:
       timeout: 5s
       retries: 5
 
-  ollama:
-    image: ollama/ollama:latest
-    restart: unless-stopped
-    ports:
-      - "11434:11434"
-    volumes:
-      - ollama_storage:/root/.ollama
-    # Note: For GPU support on Pi 5 (if applicable/supported in future), 
-    # specific runtime configs might be needed, currently running CPU mode.
-
   web:
     build: .
     command: uvicorn app.main:app --host 0.0.0.0 --port 8000 --reload
@@ -49,12 +39,9 @@ services:
         condition: service_healthy
       redis:
         condition: service_healthy
-      ollama:
-        condition: service_started
     environment:
       - DATABASE_URL=postgresql://postgres:postgres@db:5432/doc_cloud
       - CELERY_BROKER_URL=redis://redis:6379/0
-      - OLLAMA_HOST=http://ollama:11434
 
   worker:
     build: .
@@ -68,14 +55,10 @@ services:
         condition: service_healthy
       redis:
         condition: service_healthy
-      ollama:
-        condition: service_started
     environment:
       - DATABASE_URL=postgresql://postgres:postgres@db:5432/doc_cloud
       - CELERY_BROKER_URL=redis://redis:6379/0
-      - OLLAMA_HOST=http://ollama:11434
 
 volumes:
   postgres_data:
-  ollama_storage:
   monitor_data:
