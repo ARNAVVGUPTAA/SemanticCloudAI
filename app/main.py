@@ -31,7 +31,7 @@ def get_query_model():
     if query_model is None:
         # Must match tasks.py model
         logger.info("Loading Query Embedding Model...")
-        query_model = SentenceTransformer('all-MiniLM-L6-v2', device="cpu")
+        query_model = SentenceTransformer('sentence-transformers/all-MiniLM-L6-v2', device="cpu")
     return query_model
 
 @app.post("/upload")

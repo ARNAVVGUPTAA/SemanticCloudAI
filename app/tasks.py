@@ -30,11 +30,11 @@ class ModelManager:
 
         # 1. Embedding Model (SentenceTransformers)
         # Using all-MiniLM-L6-v2: ~80MB, 384 dims. Fast, efficient.
-        self.embed_model = SentenceTransformer('all-MiniLM-L6-v2', device=self.device)
+        self.embed_model = SentenceTransformer('sentence-transformers/all-MiniLM-L6-v2', device=self.device)
 
         # 2. NER Model (GLiNER)
         # Using gliner_small-v2.1: ~150MB. Good zero-shot performance.
-        self.ner_model = GLiNER.from_pretrained('gliner-community/gliner_small-v2.1').to(self.device)
+        self.ner_model = GLiNER.from_pretrained('urchade/gliner_small-v2.1').to(self.device)
         self.ner_model.eval()
 
         # 3. Taxonomy for Zero-Shot Classification
