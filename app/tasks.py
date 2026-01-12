@@ -38,13 +38,19 @@ class ModelManager:
         self.ner_model.eval()
 
         # 3. Taxonomy for Zero-Shot Classification
-        self.taxonomy = [
-            "Finance", "Legal", "Invoice", "Receipt", 
-            "Technical", "Research", "Medical", 
-            "Personal", "Creative", "Administrative"
-        ]
-        # Pre-compute taxonomy embeddings
-        self.taxonomy_embeddings = self.embed_model.encode(self.taxonomy, convert_to_tensor=True)
+        try:
+            with open("app/taxonomy.json", "r") as f:
+                data = json.load(f)
+                self.topics = data.get("topics", ["General"])
+                self.formats = data.get("formats", ["Document"])
+        except Exception as e:
+            logger.warning(f"Could not load taxonomy.json, using defaults: {e}")
+            self.topics = ["Finance", "Legal", "Technical", "Personal", "Research", "General"]
+            self.formats = ["Document", "Invoice", "Receipt", "Paper", "Book"]
+
+        # Pre-compute embeddings for both axes
+        self.topic_embeddings = self.embed_model.encode(self.topics, convert_to_tensor=True)
+        self.format_embeddings = self.embed_model.encode(self.formats, convert_to_tensor=True)
         
         logger.info("Models loaded successfully.")
 
@@ -145,11 +151,21 @@ def process_document(doc_id: int, extra_tags: str = None):
         doc_embedding = np.mean(doc_embedding_matrix, axis=0)
         
         # 2. Zero-Shot Categorization
+        # 2. Zero-Shot Categorization (Dual-Axis)
         doc_emb_tensor = torch.tensor(doc_embedding).unsqueeze(0).to(models.device)
-        sim_scores = util.cos_sim(doc_emb_tensor, models.taxonomy_embeddings)[0]
         
-        best_cat_idx = torch.argmax(sim_scores).item()
-        best_category = models.taxonomy[best_cat_idx]
+        # Axis 1: Topic
+        topic_scores = util.cos_sim(doc_emb_tensor, models.topic_embeddings)[0]
+        best_topic_idx = torch.argmax(topic_scores).item()
+        best_category = models.topics[best_topic_idx]
+        
+        # Axis 2: Format
+        format_scores = util.cos_sim(doc_emb_tensor, models.format_embeddings)[0]
+        best_format_idx = torch.argmax(format_scores).item()
+        best_format = models.formats[best_format_idx]
+        
+        # Add format to tags
+        all_tags.add(best_format)
         
         # Finalize Doc
         doc.tags = list(all_tags)
