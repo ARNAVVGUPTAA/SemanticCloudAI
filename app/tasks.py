@@ -12,6 +12,8 @@ from .database import SessionLocal
 from .models import Document
 from sentence_transformers import SentenceTransformer, util
 from gliner import GLiNER
+from transformers import AutoTokenizer, AutoModelForSeq2SeqLM
+import re
 
 # Configure logging
 logging.basicConfig(level=logging.INFO)
@@ -37,19 +39,23 @@ class ModelManager:
         self.ner_model = GLiNER.from_pretrained('urchade/gliner_medium-v2.1').to(self.device)
         self.ner_model.eval()
 
-        # 3. Taxonomy for Zero-Shot Classification
+        # 3. Small Language Model (LaMini-Flan-T5-248M)
+        # ~500MB RAM. Provides semantic understanding/instruction following.
+        logger.info("Loading SLM (LaMini-Flan-T5-248M)...")
+        self.tokenizer = AutoTokenizer.from_pretrained("MBZUAI/LaMini-Flan-T5-248M")
+        self.slm = AutoModelForSeq2SeqLM.from_pretrained("MBZUAI/LaMini-Flan-T5-248M").to(self.device)
+        self.slm.eval()
+
+        # 4. Taxonomy (Optional fallback)
         try:
             with open("app/taxonomy.json", "r") as f:
                 data = json.load(f)
-                self.topics = data.get("topics", ["General"])
                 self.formats = data.get("formats", ["Document"])
         except Exception as e:
             logger.warning(f"Could not load taxonomy.json, using defaults: {e}")
-            self.topics = ["Finance", "Legal", "Technical", "Personal", "Research", "General"]
             self.formats = ["Document", "Invoice", "Receipt", "Paper", "Book"]
 
-        # Pre-compute embeddings for both axes
-        self.topic_embeddings = self.embed_model.encode(self.topics, convert_to_tensor=True)
+        # Pre-compute embeddings for formats (fallback axis)
         self.format_embeddings = self.embed_model.encode(self.formats, convert_to_tensor=True)
         
         logger.info("Models loaded successfully.")
@@ -113,8 +119,11 @@ def process_document(doc_id: int, extra_tags: str = None):
         full_text_buffer = [] 
         
         # Stream and Process
-        # We extract standard named entities + 'topic' (abstract)
-        labels_to_extract = ["person", "organization", "location", "date", "number", "topic"]
+        # We extract standard named entities. Removed "number", "date", "topic" to reduce noise.
+        labels_to_extract = ["person", "organization", "location"]
+        
+        # Buffer for SLM (First Page / 1000 chars)
+        slm_context_buffer = ""
         
         for text_chunk in extract_text_stream(doc.file_path):
             if not text_chunk.strip():
@@ -136,6 +145,10 @@ def process_document(doc_id: int, extra_tags: str = None):
             # Keep a bit of text for DB content_text (preview)
             if len(full_text_buffer) < 5: 
                 full_text_buffer.append(text_chunk)
+                
+            # Accumulate text for SLM (approx first 2-3k chars is enough for context)
+            if len(slm_context_buffer) < 2000:
+                slm_context_buffer += " " + text_chunk
         
         if not chunk_embeddings:
             logger.warning("No text content could be processed.")
@@ -150,25 +163,67 @@ def process_document(doc_id: int, extra_tags: str = None):
         doc_embedding_matrix = np.vstack(chunk_embeddings)
         doc_embedding = np.mean(doc_embedding_matrix, axis=0)
         
-        # 2. Zero-Shot Categorization
-        # 2. Zero-Shot Categorization (Dual-Axis)
-        doc_emb_tensor = torch.tensor(doc_embedding).unsqueeze(0).to(models.device)
+        # 2. Semantic Understanding with SLM
+        # We use the SLM on the beginning of the document to get the Type and Keywords
         
-        # Axis 1: Topic
-        topic_scores = util.cos_sim(doc_emb_tensor, models.topic_embeddings)[0]
-        best_topic_idx = torch.argmax(topic_scores).item()
-        best_category = models.topics[best_topic_idx]
+        best_category = "Document"
+        slm_tags = []
         
-        # Axis 2: Format
-        format_scores = util.cos_sim(doc_emb_tensor, models.format_embeddings)[0]
-        best_format_idx = torch.argmax(format_scores).item()
-        best_format = models.formats[best_format_idx]
+        if slm_context_buffer:
+            try:
+                # Truncate to avoid max length issues (512 tokens approx 2000 chars)
+                input_text = slm_context_buffer[:2000]
+                
+                # A. Identify Document Type
+                prompt_type = f"Identify the specific document type (e.g. Statement of Purpose, Invoice, Research Paper, Resume) for this text: '{input_text}'"
+                input_ids = models.tokenizer(prompt_type, return_tensors="pt").input_ids.to(models.device)
+                outputs = models.slm.generate(input_ids, max_length=50)
+                doc_type_pred = models.tokenizer.decode(outputs[0], skip_special_tokens=True).strip()
+                
+                if doc_type_pred and len(doc_type_pred) > 2:
+                     best_category = doc_type_pred
+                     all_tags.add(best_category)
+                else:
+                    # Fallback to zero-shot format detection if SLM fails/is vague
+                    format_scores = util.cos_sim(doc_emb_tensor, models.format_embeddings)[0]
+                    best_format_idx = torch.argmax(format_scores).item()
+                    best_category = models.formats[best_format_idx]
+
+                # B. Generate Semantic Keywords
+                prompt_tags = f"Generate 5 specific, comma-separated keywords or topics that describe this text: '{input_text}'"
+                input_ids = models.tokenizer(prompt_tags, return_tensors="pt").input_ids.to(models.device)
+                outputs = models.slm.generate(input_ids, max_length=100)
+                keywords_text = models.tokenizer.decode(outputs[0], skip_special_tokens=True)
+                
+                # Parse keywords
+                for kw in keywords_text.split(','):
+                    clean_kw = kw.strip()
+                    if clean_kw:
+                        slm_tags.append(clean_kw)
+                        all_tags.add(clean_kw)
+                        
+            except Exception as e:
+                logger.warning(f"SLM inference failed: {e}")
+                # Fallback to default
         
-        # Add format to tags
-        all_tags.add(best_format)
+        # 3. Final Tag Cleaning
+        final_tags = []
+        for tag in all_tags:
+            # Normalize
+            t = tag.strip()
+            # Remove junk: 
+            # - Short tags (<3 chars)
+            # - Purely numeric (e.g "2024", "1")
+            # - Special chars only
+            if len(t) < 3: continue
+            if t.isdigit(): continue
+            if re.match(r'^[0-9\W]+$', t): continue # Only numbers and symbols
+            
+            final_tags.append(t)
         
         # Finalize Doc
-        doc.tags = list(all_tags)
+        # Finalize Doc
+        doc.tags = list(set(final_tags)) # De-duplicate
         doc.category = best_category
         # Convert numpy/tensor to list for JSON storage
         doc.embedding = doc_embedding.tolist()
