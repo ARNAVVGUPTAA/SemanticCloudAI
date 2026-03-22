@@ -16,8 +16,7 @@ class Document(Base):
     content_text = Column(Text, nullable=True) # Full extracted text
     summary = Column(Text, nullable=True)
     tags = Column(JSON, nullable=True)
-    category = Column(String, nullable=True)
-    embedding = Column(JSON, nullable=True) # Vector embedding
+    category = Column(String, nullable=True)  # This acts as the "directory" name
     
     def __repr__(self):
         return f"<Document(id={self.id}, filename='{self.filename}', status='{self.status}')>"

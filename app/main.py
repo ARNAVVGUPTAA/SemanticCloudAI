@@ -9,8 +9,8 @@ from sqlalchemy.orm import Session
 from .database import engine, get_db, Base
 from .models import Document
 from .tasks import process_document
-from sentence_transformers import SentenceTransformer, util
-import torch
+from langchain_chroma import Chroma
+from .vector_store import get_embeddings_model, chroma_client
 
 # Create DB tables
 Base.metadata.create_all(bind=engine)
@@ -22,17 +22,15 @@ os.makedirs(UPLOAD_DIR, exist_ok=True)
 
 logger = logging.getLogger(__name__)
 
-# Global Embedding Model for Queries (Lazy Load)
-query_model = None
+# Global LangChain embeddings model
+embeddings_model = None
 
-def get_query_model():
-    """Single instance of embedding model for the API process"""
-    global query_model
-    if query_model is None:
-        # Must match tasks.py model
-        logger.info("Loading Query Embedding Model...")
-        query_model = SentenceTransformer('sentence-transformers/all-mpnet-base-v2', device="cpu")
-    return query_model
+def get_query_embeddings():
+    global embeddings_model
+    if embeddings_model is None:
+        logger.info("Loading LangChain Embeddings Model...")
+        embeddings_model = get_embeddings_model()
+    return embeddings_model
 
 @app.post("/upload")
 def upload_file(
@@ -75,76 +73,35 @@ def query_documents(
     Semantic Search using SentenceTransformers.
     """
     try:
-        model = get_query_model()
+        # 1. Setup LangChain Vector Store
+        embeddings = get_query_embeddings()
+        vectorstore = Chroma(
+            client=chroma_client,
+            collection_name="documents",
+            embedding_function=embeddings
+        )
         
-        # 1. Embed Query
-        query_embedding = model.encode(query_text)
-        
-        # 2. Extract keywords for hybrid filtering (simple split for now)
-        # We could also use GLiNER here if we wanted to extract specific entities
+        # 2. Extract keywords for context (optional display)
         context_tags = query_text.lower().split()
         
-        # 3. Fetch Candidates
-        candidates = db.query(Document).filter(Document.status == "COMPLETED").all()
+        # 3. LangChain Prompt-based Retrieval
+        # Retrieve top 20 most similar documents using semantic similarity
+        logger.info(f"LangChain Retrieval for Query: '{query_text}'")
+        docs = vectorstore.similarity_search_with_relevance_scores(query_text, k=20)
         
-        results = []
-        if not candidates:
-            return {"interpreted_query": {"context_tags": context_tags}, "matches": []}
-
-        # Vector Search
-        # Prepare doc vectors
-        doc_ids = []
-        doc_vecs = []
-        valid_candidates = []
-        
-        for doc in candidates:
-            if doc.embedding and len(doc.embedding) > 0:
-                doc_vecs.append(doc.embedding)
-                doc_ids.append(doc.id)
-                valid_candidates.append(doc)
-        
-        if not doc_vecs:
-             return {"interpreted_query": {"context_tags": context_tags}, "matches": []}
-
-        # Compute Similarities (Vectorized)
-        # query_embedding: (384,)
-        # doc_vecs: (N, 384)
-        query_vec = torch.tensor(query_embedding).unsqueeze(0) # (1, 384)
-        doc_matrix = torch.tensor(doc_vecs) # (N, 384)
-        
-        # Cosine Similarity
-        cosine_scores = util.cos_sim(query_vec, doc_matrix)[0] # (N,)
-        
-        # Sort and Format
         matches = []
-        for idx, score in enumerate(cosine_scores):
-            doc = valid_candidates[idx]
-            final_score = score.item()
+        for doc, score in docs:
+            matches.append({
+                "id": doc.metadata.get("id"),
+                "filename": doc.metadata.get("filename"),
+                "tags": doc.metadata.get("tags", "").split(",") if doc.metadata.get("tags") else [],
+                "category": doc.metadata.get("category"),
+                "score": round(score, 4)
+            })
             
-            # Simple keyword boost
-            # If filename or tags contain query terms, boost slightly
-            boost = 0
-            if any(t in doc.filename.lower() for t in context_tags):
-                boost += 0.1
-            
-            matches.append((doc, final_score + boost))
-            
-        # Top Results
-        matches.sort(key=lambda x: x[1], reverse=True)
-        top_matches = matches[:20]
-        
         return {
-            "interpreted_query": {"context_tags": context_tags},
-            "matches": [
-                {
-                    "id": d.id,
-                    "filename": d.filename,
-                    "tags": d.tags,
-                    "category": d.category,
-                    "score": round(s, 4),
-                    "upload_time": d.upload_time
-                } for d, s in top_matches
-            ]
+            "interpreted_query": {"query": query_text, "context_tags": context_tags},
+            "matches": matches
         }
 
     except Exception as e:
@@ -171,6 +128,16 @@ def reset_system(db: Session = Depends(get_db)):
     try:
         db.query(Document).delete()
         db.commit()
+        
+        # Reset ChromaDB collections
+        try:
+            chroma_client.delete_collection("documents")
+            chroma_client.delete_collection("directories")
+            chroma_client.get_or_create_collection("documents", metadata={"hnsw:space": "cosine"})
+            chroma_client.get_or_create_collection("directories", metadata={"hnsw:space": "cosine"})
+        except Exception as ce:
+            logger.warning(f"Error resetting chroma collections: {ce}")
+
         if os.path.exists(UPLOAD_DIR):
             for filename in os.listdir(UPLOAD_DIR):
                 file_path = os.path.join(UPLOAD_DIR, filename)

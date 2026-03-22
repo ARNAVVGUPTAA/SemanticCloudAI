@@ -34,6 +34,7 @@ services:
     volumes:
       - .:/app
       - ./uploads:/app/uploads
+      - ./chroma_data:/app/chroma_data
     depends_on:
       db:
         condition: service_healthy
@@ -50,6 +51,7 @@ services:
     volumes:
       - .:/app
       - ./uploads:/app/uploads
+      - ./chroma_data:/app/chroma_data
     depends_on:
       db:
         condition: service_healthy

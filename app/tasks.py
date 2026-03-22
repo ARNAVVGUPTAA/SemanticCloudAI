@@ -14,6 +14,7 @@ from sentence_transformers import SentenceTransformer, util
 from gliner import GLiNER
 from transformers import AutoTokenizer, AutoModelForSeq2SeqLM
 import re
+from .vector_store import directories_collection, documents_collection
 
 # Configure logging
 logging.basicConfig(level=logging.INFO)
@@ -21,6 +22,10 @@ logger = logging.getLogger(__name__)
 
 CELERY_BROKER_URL = os.getenv("CELERY_BROKER_URL", "redis://localhost:6379/0")
 celery_app = Celery("worker", broker=CELERY_BROKER_URL)
+
+if os.getenv("LOCAL_MODE"):
+    celery_app.conf.task_always_eager = True
+    logger.info("LOCAL_MODE enabled: Celery tasks will run eagerly (synchronously) without a broker.")
 
 # Model Manager to handle lazy loading within the worker process
 class ModelManager:
@@ -221,17 +226,73 @@ def process_document(doc_id: int, extra_tags: str = None):
             
             final_tags.append(t)
         
-        # Finalize Doc
-        # Finalize Doc
+        # 4. Semantic Directory Logic (Thresholds: >85% merge, <40% branch)
+        doc_emb_list = doc_embedding.tolist()
+        assigned_category = best_category # Default from SLM
+        
+        # Query directories
+        dir_results = directories_collection.query(
+            query_embeddings=[doc_emb_list],
+            n_results=1
+        )
+        
+        if dir_results and dir_results["distances"] and len(dir_results["distances"][0]) > 0:
+            # ChromaDB cosine distance: distance = 1.0 - cosine_similarity
+            # Therefore similarity = 1.0 - distance
+            distance = dir_results["distances"][0][0]
+            similarity = 1.0 - distance
+            closest_dir_name = dir_results["metadatas"][0][0]["name"]
+            
+            logger.info(f"Closest directory: {closest_dir_name} with similarity {similarity:.2f}")
+            
+            if similarity >= 0.85:
+                # Merge: Perfect match
+                assigned_category = closest_dir_name
+                logger.info(f"Merge: Document mapped to existing directory '{assigned_category}'")
+            elif similarity <= 0.40:
+                # Branch: New concept
+                assigned_category = best_category
+                logger.info(f"Branch: Creating new directory '{assigned_category}' based on concept")
+                # Add new directory to Chroma
+                directories_collection.add(
+                    ids=[assigned_category],
+                    embeddings=[doc_emb_list],
+                    metadatas=[{"name": assigned_category}]
+                )
+            else:
+                # Middle-ground: Assign to closest, or we could strict branch. 
+                # Request was "85% merge, 40% branch". We will assign to closest if it's kinda related.
+                assigned_category = closest_dir_name
+                logger.info(f"Assigning to moderately related directory '{assigned_category}'")
+        else:
+            # No directories exist yet, create the first one
+            logger.info(f"First directory created: '{assigned_category}'")
+            directories_collection.add(
+                ids=[assigned_category],
+                embeddings=[doc_emb_list],
+                metadatas=[{"name": assigned_category}]
+            )
+            
+        # Finalize Doc in DB
         doc.tags = list(set(final_tags)) # De-duplicate
-        doc.category = best_category
-        # Convert numpy/tensor to list for JSON storage
-        doc.embedding = doc_embedding.tolist()
+        doc.category = assigned_category
         doc.content_text = "\n\n".join(full_text_buffer)[:5000] 
         doc.status = "COMPLETED"
         
+        # Insert Document Vector into ChromaDB
+        documents_collection.add(
+            ids=[str(doc.id)],
+            embeddings=[doc_emb_list],
+            metadatas=[{
+                "id": doc.id,
+                "filename": doc.filename,
+                "category": assigned_category,
+                "tags": ",".join(doc.tags)
+            }]
+        )
+        
         db.commit()
-        logger.info(f"Finished processing document {doc_id}. Category: {best_category}")
+        logger.info(f"Finished processing document {doc_id}. Assigned: {assigned_category}")
 
     except Exception as e:
         logger.error(f"Critical error in task: {e}", exc_info=True)
