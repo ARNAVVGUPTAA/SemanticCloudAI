@@ -11,9 +11,5 @@ python-multipart
 numpy
 gliner
 sentence-transformers
-torch
 transformers
 chromadb
-langchain
-langchain-huggingface
-langchain-community
