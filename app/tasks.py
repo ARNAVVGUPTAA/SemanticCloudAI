@@ -14,7 +14,7 @@ from sentence_transformers import SentenceTransformer, util
 from gliner import GLiNER
 from transformers import AutoTokenizer, AutoModelForSeq2SeqLM
 import re
-from langchain.text_splitter import RecursiveCharacterTextSplitter
+from langchain_text_splitters import TokenTextSplitter
 from .vector_store import directories_collection, documents_collection
 
 # Configure logging
@@ -131,11 +131,11 @@ def process_document(doc_id: int, extra_tags: str = None):
         # Buffer for SLM (First Page / 1000 chars)
         slm_context_buffer = ""
         
-        # Initialize LangChain text splitter to constrain chunks to max 1000 chars
-        text_splitter = RecursiveCharacterTextSplitter(
-            chunk_size=1000,
-            chunk_overlap=150,
-            length_function=len
+        # Initialize LangChain text splitter to count actual tokens.
+        # We set it to 380 to safely stay just under SentenceTransformer's 384 limit.
+        text_splitter = TokenTextSplitter(
+            chunk_size=380,
+            chunk_overlap=50
         )
         
         for page_text in extract_text_stream(doc.file_path):
