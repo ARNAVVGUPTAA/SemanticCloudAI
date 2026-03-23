@@ -162,7 +162,12 @@ def process_document(doc_id: int, extra_tags: str = None):
                 
                 # Extract Entities (using GLiNER)
                 try:
-                    entities = models.ner_model.predict_entities(text_chunk, labels_to_extract, threshold=0.3)
+                    # THE FAILSAFE: Hard cap the text at 250 actual words. 
+                    # This bypasses the tokenizer mismatch entirely.
+                    safe_text_chunk = " ".join(text_chunk.split()[:250])
+                    
+                    # Pass the safe chunk to GLiNER instead of the raw text_chunk
+                    entities = models.ner_model.predict_entities(safe_text_chunk, labels_to_extract, threshold=0.3)
                     for ent in entities:
                         all_tags.add(ent['text'].lower())
                 except Exception as e:
