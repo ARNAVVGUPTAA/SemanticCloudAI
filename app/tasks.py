@@ -14,6 +14,7 @@ from sentence_transformers import SentenceTransformer, util
 from gliner import GLiNER
 from transformers import AutoTokenizer, AutoModelForSeq2SeqLM
 import re
+from langchain.text_splitter import RecursiveCharacterTextSplitter
 from .vector_store import directories_collection, documents_collection
 
 # Configure logging
@@ -130,30 +131,42 @@ def process_document(doc_id: int, extra_tags: str = None):
         # Buffer for SLM (First Page / 1000 chars)
         slm_context_buffer = ""
         
-        for text_chunk in extract_text_stream(doc.file_path):
-            if not text_chunk.strip():
+        # Initialize LangChain text splitter to constrain chunks to max 1000 chars
+        text_splitter = RecursiveCharacterTextSplitter(
+            chunk_size=1000,
+            chunk_overlap=150,
+            length_function=len
+        )
+        
+        for page_text in extract_text_stream(doc.file_path):
+            if not page_text.strip():
                 continue
-            
-            # 1. Embed Chunk (using SentenceTransformer)
-            embedding = models.embed_model.encode(text_chunk)
-            chunk_embeddings.append(embedding)
-            
-            # 2. Extract Entities (using GLiNER)
-            # Threshold 0.3-0.4 is usually good for small model
-            try:
-                entities = models.ner_model.predict_entities(text_chunk, labels_to_extract, threshold=0.3)
-                for ent in entities:
-                    all_tags.add(ent['text'].lower())
-            except Exception as e:
-                logger.warning(f"NER extraction failed for chunk: {e}")
-            
+                
             # Keep a bit of text for DB content_text (preview)
             if len(full_text_buffer) < 5: 
-                full_text_buffer.append(text_chunk)
+                full_text_buffer.append(page_text)
                 
             # Accumulate text for SLM (approx first 2-3k chars is enough for context)
             if len(slm_context_buffer) < 2000:
-                slm_context_buffer += " " + text_chunk
+                slm_context_buffer += " " + page_text
+            
+            # 1. Break down the massive page text into smaller individual chunks
+            chunks = text_splitter.split_text(page_text)
+            
+            for text_chunk in chunks:
+                if not text_chunk.strip(): continue
+
+                # Embed Chunk (using SentenceTransformer)
+                embedding = models.embed_model.encode(text_chunk)
+                chunk_embeddings.append(embedding)
+                
+                # Extract Entities (using GLiNER)
+                try:
+                    entities = models.ner_model.predict_entities(text_chunk, labels_to_extract, threshold=0.3)
+                    for ent in entities:
+                        all_tags.add(ent['text'].lower())
+                except Exception as e:
+                    logger.warning(f"NER extraction failed for chunk: {e}")
         
         if not chunk_embeddings:
             logger.warning("No text content could be processed.")
