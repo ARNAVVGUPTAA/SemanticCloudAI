@@ -19,7 +19,7 @@ RUN pip install --no-cache-dir --default-timeout=1000 --retries=10 \
 
 # Install Langchain and related splitters
 RUN pip install --no-cache-dir --default-timeout=1000 --retries=10 \
-    langchain langchain-text-splitters langchain-huggingface langchain-community
+    langchain langchain-text-splitters langchain-huggingface langchain-community langchain-chroma
 
 COPY requirements.txt .
 RUN pip install --no-cache-dir --default-timeout=1000 --retries=10 -r requirements.txt
