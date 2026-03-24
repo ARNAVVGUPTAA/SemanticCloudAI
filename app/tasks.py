@@ -14,7 +14,7 @@ from sentence_transformers import SentenceTransformer, util
 from gliner import GLiNER
 from transformers import AutoTokenizer, AutoModelForSeq2SeqLM
 import re
-from langchain_text_splitters import TokenTextSplitter
+from langchain_text_splitters import SentenceTransformersTokenTextSplitter
 from .vector_store import directories_collection, documents_collection
 
 # Configure logging
@@ -132,10 +132,10 @@ def process_document(doc_id: int, extra_tags: str = None):
         slm_context_buffer = ""
         
         # Initialize LangChain text splitter to count actual tokens.
-        # We set it to 380 to safely stay just under SentenceTransformer's 384 limit.
-        text_splitter = TokenTextSplitter(
-            chunk_size=380,
-            chunk_overlap=50
+        text_splitter = SentenceTransformersTokenTextSplitter(
+            model_name="sentence-transformers/all-mpnet-base-v2",
+            chunk_overlap=40,
+            tokens_per_chunk=384
         )
         
         for page_text in extract_text_stream(doc.file_path):
@@ -162,12 +162,7 @@ def process_document(doc_id: int, extra_tags: str = None):
                 
                 # Extract Entities (using GLiNER)
                 try:
-                    # THE FAILSAFE: Hard cap the text at 250 actual words. 
-                    # This bypasses the tokenizer mismatch entirely.
-                    safe_text_chunk = " ".join(text_chunk.split()[:250])
-                    
-                    # Pass the safe chunk to GLiNER instead of the raw text_chunk
-                    entities = models.ner_model.predict_entities(safe_text_chunk, labels_to_extract, threshold=0.3)
+                    entities = models.ner_model.predict_entities(text_chunk, labels_to_extract, threshold=0.3)
                     for ent in entities:
                         all_tags.add(ent['text'].lower())
                 except Exception as e:
@@ -194,12 +189,9 @@ def process_document(doc_id: int, extra_tags: str = None):
         
         if slm_context_buffer:
             try:
-                # Truncate to avoid max length issues (512 tokens approx 2000 chars)
-                input_text = slm_context_buffer[:2000]
-                
                 # A. Identify Document Type
-                prompt_type = f"Identify the specific document type (e.g. Statement of Purpose, Invoice, Research Paper, Resume) for this text: '{input_text}'"
-                input_ids = models.tokenizer(prompt_type, return_tensors="pt").input_ids.to(models.device)
+                prompt_type = f"Identify the specific document type (e.g. Statement of Purpose, Invoice, Research Paper, Resume) for this text: '{slm_context_buffer}'"
+                input_ids = models.tokenizer(prompt_type, return_tensors="pt", truncation=True, max_length=512).input_ids.to(models.device)
                 outputs = models.slm.generate(input_ids, max_length=50)
                 doc_type_pred = models.tokenizer.decode(outputs[0], skip_special_tokens=True).strip()
                 
@@ -208,13 +200,14 @@ def process_document(doc_id: int, extra_tags: str = None):
                      all_tags.add(best_category)
                 else:
                     # Fallback to zero-shot format detection if SLM fails/is vague
+                    doc_emb_tensor = torch.tensor(doc_embedding, dtype=torch.float32).to(models.device)
                     format_scores = util.cos_sim(doc_emb_tensor, models.format_embeddings)[0]
                     best_format_idx = torch.argmax(format_scores).item()
                     best_category = models.formats[best_format_idx]
 
                 # B. Generate Semantic Keywords
-                prompt_tags = f"Generate 5 specific, comma-separated keywords or topics that describe this text: '{input_text}'"
-                input_ids = models.tokenizer(prompt_tags, return_tensors="pt").input_ids.to(models.device)
+                prompt_tags = f"Generate 5 specific, comma-separated keywords or topics that describe this text: '{slm_context_buffer}'"
+                input_ids = models.tokenizer(prompt_tags, return_tensors="pt", truncation=True, max_length=512).input_ids.to(models.device)
                 outputs = models.slm.generate(input_ids, max_length=100)
                 keywords_text = models.tokenizer.decode(outputs[0], skip_special_tokens=True)
                 
