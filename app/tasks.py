@@ -7,6 +7,7 @@ from PIL import Image
 import pytesseract
 from pypdf import PdfReader
 from celery import Celery
+from celery.signals import worker_process_init
 from sqlalchemy.orm import Session
 from .database import SessionLocal
 from .models import Document
@@ -72,6 +73,11 @@ class ModelManager:
             cls._instance = cls()
         return cls._instance
 
+@worker_process_init.connect
+def init_worker(**kwargs):
+    logger.info("Initializing worker process: pre-loading models")
+    ModelManager.get_instance()
+
 def get_db_session():
     return SessionLocal()
 
@@ -123,6 +129,7 @@ def process_document(doc_id: int, extra_tags: str = None):
 
         chunk_embeddings = []
         full_text_buffer = [] 
+        all_text_chunks = []
         
         # Stream and Process
         # We extract standard named entities. Removed "number", "date", "topic" to reduce noise.
@@ -154,26 +161,43 @@ def process_document(doc_id: int, extra_tags: str = None):
             chunks = text_splitter.split_text(page_text)
             
             for text_chunk in chunks:
-                if not text_chunk.strip(): continue
-
-                # Embed Chunk (using SentenceTransformer)
-                embedding = models.embed_model.encode(text_chunk)
-                chunk_embeddings.append(embedding)
-                
-                # Extract Entities (using GLiNER)
-                try:
-                    entities = models.ner_model.predict_entities(text_chunk, labels_to_extract, threshold=0.3)
-                    for ent in entities:
-                        all_tags.add(ent['text'].lower())
-                except Exception as e:
-                    logger.warning(f"NER extraction failed for chunk: {e}")
+                if text_chunk.strip():
+                    all_text_chunks.append(text_chunk)
         
-        if not chunk_embeddings:
+        if not all_text_chunks:
             logger.warning("No text content could be processed.")
             doc.status = "FAILED"
             doc.content_text = "No extractable text found."
             db.commit()
             return
+
+        # 2. Batch Encode Embeddings
+        logger.info(f"Batch Encoding {len(all_text_chunks)} chunks for document {doc_id}")
+        with torch.no_grad():
+            doc_embedding_matrix = models.embed_model.encode(all_text_chunks, batch_size=16, show_progress_bar=False)
+        chunk_embeddings = list(doc_embedding_matrix)
+
+        # 3. Batch Extract Entities (Mini-batches for CPU optimization)
+        batch_size = 16
+        with torch.no_grad():
+            if hasattr(models.ner_model, 'batch_predict_entities'):
+                try:
+                    batch_results = models.ner_model.batch_predict_entities(all_text_chunks, labels_to_extract, threshold=0.3)
+                    for entities in batch_results:
+                        for ent in entities:
+                            all_tags.add(ent['text'].lower())
+                except Exception as e:
+                    logger.warning(f"Batch NER extraction failed: {e}")
+            else:
+                for i in range(0, len(all_text_chunks), batch_size):
+                    mini_batch = all_text_chunks[i:i + batch_size]
+                    try:
+                        for text_chunk in mini_batch:
+                            entities = models.ner_model.predict_entities(text_chunk, labels_to_extract, threshold=0.3)
+                            for ent in entities:
+                                all_tags.add(ent['text'].lower())
+                    except Exception as e:
+                        logger.warning(f"Mini-batch NER extraction failed: {e}")
 
         # Aggregate Results
         
@@ -187,6 +211,7 @@ def process_document(doc_id: int, extra_tags: str = None):
         best_category = "Document"
         slm_tags = []
         
+        ''' TEMPORARY BYPASS: SLM Inference is disabled for stability/speed.
         if slm_context_buffer:
             try:
                 # A. Identify Document Type
@@ -221,6 +246,7 @@ def process_document(doc_id: int, extra_tags: str = None):
             except Exception as e:
                 logger.warning(f"SLM inference failed: {e}")
                 # Fallback to default
+        '''
         
         # 3. Final Tag Cleaning
         final_tags = []

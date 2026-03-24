@@ -35,6 +35,7 @@ services:
       - .:/app
       - ./uploads:/app/uploads
       - ./chroma_data:/app/chroma_data
+      - ./huggingface_cache:/app/models_cache
     depends_on:
       db:
         condition: service_healthy
@@ -43,6 +44,7 @@ services:
     environment:
       - DATABASE_URL=postgresql://postgres:postgres@db:5432/doc_cloud
       - CELERY_BROKER_URL=redis://redis:6379/0
+      - HF_HOME=/app/models_cache
 
   worker:
     build: .
@@ -52,6 +54,7 @@ services:
       - .:/app
       - ./uploads:/app/uploads
       - ./chroma_data:/app/chroma_data
+      - ./huggingface_cache:/app/models_cache
     depends_on:
       db:
         condition: service_healthy
@@ -60,6 +63,7 @@ services:
     environment:
       - DATABASE_URL=postgresql://postgres:postgres@db:5432/doc_cloud
       - CELERY_BROKER_URL=redis://redis:6379/0
+      - HF_HOME=/app/models_cache
 
 volumes:
   postgres_data:
